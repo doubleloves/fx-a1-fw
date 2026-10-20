@@ -5,5 +5,13 @@ set -e
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 IMG="${1:-$(ls -t "$ROOT"/dist/FX_A1_v*.bin 2>/dev/null | head -1)}"
 [ -n "$IMG" ] || { echo "找不到固件，请先 ./build.sh"; exit 1; }
-echo "刷写: $IMG"
+[ -f "$IMG" ] || { echo "文件不存在: $IMG"; exit 1; }
+SIZE=$(stat -c%s "$IMG")
+[ "$SIZE" -ge $((0x75000)) ] || { echo "文件太小，不是有效的整机固件: $IMG"; exit 1; }
+
+echo "固件: $IMG"
+echo "大小: $SIZE 字节"
+md5sum "$IMG"
+
+# 串口为第一个 /dev/ttyUSB*，bootloader @ 921600，写入分区 ID3
 python3 "$ROOT/tools/a1_flash_part.py" 3 "$IMG"
