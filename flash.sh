@@ -12,6 +12,10 @@ SIZE=$(stat -c%s "$IMG")
 echo "固件: $IMG"
 echo "大小: $SIZE 字节"
 md5sum "$IMG"
+echo
+echo "⚠️  刷写时不要接 220V 市电，避免带电操作/触电。"
+echo "⚠️  必须装好滤芯，或压住滤芯微动开关，否则设备不上电/不工作。"
+echo
 
 # 串口为第一个 /dev/ttyUSB*，bootloader @ 921600，写入分区 ID3
 python3 "$ROOT/tools/a1_flash_part.py" 3 "$IMG"
