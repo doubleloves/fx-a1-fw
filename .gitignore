@@ -1,0 +1,35 @@
+# 构建产物
+build/
+dist/
+*.o
+*.d
+.gdbinit
+.openocd_cfg
+
+# 设备备份 / 原厂固件（含个人设备数据，切勿公开）
+backup/
+flash_images/
+
+# 第三方 SDK（由 setup.sh 从上游拉取，不入库）
+mico-os/
+mico-os.tar.gz
+
+# 第三方二进制内核（非源码；由 tools/extract_kernel.sh 生成）
+kernel/*.bin
+
+# 工具链等大文件（不入库，按 README/项目记录说明自行准备）
+tools/py27/
+tools/gnu-mcu-eclipse/
+tools/gcc14/
+tools/mm/
+tools/mamba_root/
+tools/*.tar.*
+tools/*.tgz
+tools/*.bz2
+tools/*.deb
+tools/__pycache__/
+
+# 杂项
+__pycache__/
+*.pyc
+.DS_Store

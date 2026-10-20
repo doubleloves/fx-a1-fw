@@ -1,0 +1,16 @@
+--- a/MiCO/system/qc_test/qc_test.mk
++++ b/MiCO/system/qc_test/qc_test.mk
+@@ -14,8 +14,11 @@
+                    internal/qc_test_tcpip.c \
+                    internal/qc_test_wlan.c \
+                    internal/qc_test_ble.c \
+-                   internal/qc_test_cli.c \
+-                   internal/qc_test.blenrg.c
++                   internal/qc_test_cli.c
++
++ifneq ($(DISABLE_MICO_BLUENRG),1)
++$(NAME)_SOURCES += internal/qc_test.blenrg.c
++endif
+                    
+ GLOBAL_INCLUDES := . 
+ $(NAME)_INCLUDES := internal

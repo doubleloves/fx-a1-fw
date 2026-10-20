@@ -1,0 +1,5 @@
+--- /dev/null
++++ b/libraries/daemons/http_server/common.h
+@@ -0,0 +1,2 @@
++/* shim for moc builds: httpd.h includes "common.h" */
++#include "mico_common.h"
