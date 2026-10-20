@@ -41,7 +41,7 @@
 #define SOFTAP_IP          "192.168.4.1"
 
 /* ------------------- 用户配置 ------------------- */
-#define A1_CFG_VERSION 7
+#define A1_CFG_VERSION 8
 
 typedef struct {
     uint32_t version;
@@ -1687,7 +1687,13 @@ int main(void)
     cli_register_command(&pwm_cli_cmd);   /* 串口: pwm ... */
     A1_LOG("=== A1 firmware %s ===", A1_VERSION);
 
-    if (cfg->version != A1_CFG_VERSION) {
+    if (cfg->version == 7) {
+        /* 7 -> 8: 灯环默认关闭(其余配置保留) */
+        A1_LOG("cfg migrate 7->8: led default off");
+        cfg->led = 0;
+        cfg->version = A1_CFG_VERSION;
+        mico_system_context_update(sys_context);
+    } else if (cfg->version != A1_CFG_VERSION) {
         A1_LOG("cfg version mismatch, defaults");
         appRestoreDefault_callback(cfg, sizeof(a1_config_t));
         mico_system_context_update(sys_context);
