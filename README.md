@@ -67,13 +67,26 @@
 
 ### 3. 准备基础内核（重要）
 
-SDK 自带的内核在 A1 上无法启动，必须使用兼容的基础内核。仓库不提供该二进制文件：
+SDK 自带的内核在 A1 上无法启动，必须使用兼容的基础内核。仓库不直接提供该二进制文件，但脚本会自动从**公开基础固件**（zA1 v0.3.1 Release）下载并提取：
 
 ```bash
-./tools/extract_kernel.sh <基础固件.bin>
+./tools/extract_kernel.sh
 ```
 
-该脚本提取固件前 `0x75000` 字节作为 `kernel/A1_kernel.bin`。
+也可以指定本地固件或 URL：
+
+```bash
+./tools/extract_kernel.sh /path/to/base_firmware.bin
+./tools/extract_kernel.sh https://example.com/base_firmware.bin
+```
+
+脚本取固件前 `0x75000` 字节作为 `kernel/A1_kernel.bin`。已验证的 002.024 内核 md5 为：
+
+```
+cd3618b81ca8cd26b43caca885fbc9bf
+```
+
+如果自动下载失败（`github.com` 访问不了），手动下载基础固件的 `.ota.bin`，再用本地方式提取即可。
 
 ### 4. 编译
 
