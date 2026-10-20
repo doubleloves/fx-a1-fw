@@ -9,16 +9,17 @@
 
 ## 功能
 
-- 开关 / 风速（1–100，网页滑条 + 面板滑条）
+- 开关 / 风速（1–100，网页滑条 + 面板滑条，面板 100ms 轮询）
 - 5 种模式：睡眠 / 低速 / 中速 / 高速 / 极速
 - 触摸面板（I2C 地址 `0x08`）：滑条调速、短按开关机、长按约 5s 重置 WiFi
-- 31 颗 WS2812 灯环：随速 / 固定色 / 跑马灯 / 流光 / 呼吸 / 静态彩虹，色相与亮度可调
+- 31 颗 WS2812 灯环：**默认关闭**；效果 = 随速 / 固定色 / 跑马灯 / 流光 / 呼吸 / 静态彩虹，色相与亮度可调
+  - 随速模式：**速度越快越亮**（亮度 10%→100%），同时颜色蓝→红
 - 热点配网：`A1_xxxx` @ `192.168.4.1`，网页扫描 WiFi 并连接
 - REST API + 深色网页控制界面
 - MQTT + Home Assistant 自动发现（⚠️ **未实机验证**）
 - OTA 升级（网页上传本地 `.bin`）
-- 5 组定时任务，SNTP 自动对时
-- 滤芯计时 / 童锁 / 运行时间 / 串口日志
+- **5 组定时开关**（一次 / 每天 / 工作日 / 周末）+ **倒计时开关机**，SNTP 自动对时（⚠️ **未实机验证**）
+- 风扇转速（RPM）/ 滤芯使用时间与剩余寿命 / 童锁 / 运行时间 / 串口日志
 
 ## 硬件
 
@@ -126,7 +127,7 @@ cd3618b81ca8cd26b43caca885fbc9bf
    - SecureCRT：`Transfer → Send YMODEM`
    - Xshell：`传输 → 用 YMODEM 发送`
    - 其他终端找 `YMODEM send` / `sz --ymodem` 等价功能
-5. 等待传输完成（约 592KB）
+5. 等待传输完成（约 596KB）
 6. 输入 `7` 重启（`6` 也可启动应用），或断电重上电
 7. 断电、断开 19 脚，再正常上电运行
 
@@ -162,9 +163,14 @@ cd3618b81ca8cd26b43caca885fbc9bf
 /api/status  /api/power  /api/speed  /api/mode  /api/led
 /api/lock    /api/filter/reset        /api/reboot  /api/factory
 /api/wifi/scan  /api/wifi/status  /api/wifi/set
-/api/mqtt   /api/ota   /api/task
+/api/mqtt   /api/ota   /api/task   /api/countdown
 诊断: /api/diag/pwm  /api/diag/gpio  /api/diag/i2c  /api/diag/i2cscan
 ```
+
+- `/api/task?i=0..4&hour=HH&minute=MM&repeat=R&action=A&on=0|1`
+  - `repeat`: `0`=一次, `31`=工作日, `96`=周末, `127`=每天
+  - `action`: `0`=关机, `1`=开机
+- `/api/countdown?sec=秒&action=0|1`（`sec=0` 取消）
 
 ## 说明与限制
 
@@ -173,6 +179,9 @@ cd3618b81ca8cd26b43caca885fbc9bf
 - 修改配置结构时需递增 `A1_CFG_VERSION`，否则旧配置可能导致异常。
 - **MQTT / Home Assistant 自动发现尚未实机验证**，相关功能与 topic 可能仍需调整。
 - **OTA 上传升级尚未完成实机验证**，首次使用请盯串口日志。
+- **定时开关 / 倒计时尚未实机验证**，建议先短时间倒计时测试。
+- **风扇转速**依赖风机 tacho 输出接到 `MICO_GPIO_10`；若显示为 0，说明该脚未接或脉冲数/转不同（可改 `A1_TACHO_PPR`）。
+- **滤芯剩余**按 2000h 寿命估算，仅作参考；更换滤芯后请点“滤芯重置”。
 - 详细开发记录、硬件逆向结论与踩坑经验见 [`项目记录.md`](项目记录.md)。
 
 ## 致谢

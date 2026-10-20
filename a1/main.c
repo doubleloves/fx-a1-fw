@@ -28,6 +28,10 @@
 #ifndef A1_FAN_TACHO_GPIO
 #define A1_FAN_TACHO_GPIO  MICO_GPIO_10
 #endif
+/* 转速脉冲数/转 (常见风扇 2), 用于把 tacho 脉冲换算成 RPM */
+#ifndef A1_TACHO_PPR
+#define A1_TACHO_PPR       2
+#endif
 #ifndef A1_LED_PWM
 #define A1_LED_PWM         MICO_PWM_4   /* 通道3 = GPIO_13 = LED */
 #endif
@@ -57,6 +61,7 @@ typedef struct {
 static system_config_t *sys_context = NULL;
 static a1_config_t      *cfg = NULL;
 static volatile int      cfg_dirty = 0;   /* 延迟落盘: 频繁操作不每次都写flash */
+static volatile int      g_panel_hold = 0; /* 滑条操作后延迟落盘, 避免滑动时写flash卡顿 */
 static void cfg_save_now(void) { mico_system_context_update(sys_context); cfg_dirty = 0; }
 static char              a1_mac[16] = {0};
 static char              sta_ip[16] = {0};
@@ -66,6 +71,9 @@ static volatile int      wifi_evt = -1;
 static volatile int      wifi_fail_cnt = 0;
 static volatile int      wifi_fallback_done = 0;
 static volatile uint32_t fan_pulses = 0, fan_rpm = 0;
+/* 倒计时: 剩余秒数(0=未启用), 动作 0=关机 1=开机 */
+static volatile int32_t g_cd_sec = 0;
+static volatile int     g_cd_action = 0;
 
 /* 扫描结果 */
 #define MAX_SCAN_AP 24
@@ -290,9 +298,12 @@ static void led_ring_refresh(void)
         if (cfg->led_mode == 2) {
             hsl2rgb(cfg->led_hue, 100, 50, &r,&g,&b);
         } else if (cfg->power) {
-            int sp = cfg->speed > 100 ? 100 : cfg->speed;
+            int sp = cfg->speed; if (sp < 0) sp = 0; if (sp > 100) sp = 100;
             int hue = 240 - (240 * sp) / 100;   /* 蓝 -> 红 */
             hsl2rgb(hue, 100, 50, &r,&g,&b);
+            /* 随速模式: 亮度也随速度线性增加(10%~100%), 速度越快越亮 */
+            int ss = 10 + (90 * sp) / 100;
+            r = r * ss / 100; g = g * ss / 100; b = b * ss / 100;
         } else {
             /* 关机且随速模式 => 熄灭 */
             r = g = b = 0;
@@ -515,6 +526,20 @@ static void a1_apply(void)
     mico_rtos_unlock_mutex(&g_apply_mux);
 }
 
+/* 只更新风机(滑条用): 避免每次滑动都重发整帧灯环, 提高手感 */
+static void a1_apply_fan(void)
+{
+    mico_rtos_lock_mutex(&g_apply_mux);
+    if (cfg->power && !cfg->lock) {
+        int sp = cfg->speed, ms = mode_to_speed(cfg->mode);
+        if (ms >= 0) sp = ms;
+        if (sp < 1) sp = 50;
+        a1_fan_set(sp);
+    } else a1_fan_set(0);
+    if (cfg->led && cfg->led_mode == 1) a1_led_set(cfg->led);  /* 随速灯效才需要重绘 */
+    mico_rtos_unlock_mutex(&g_apply_mux);
+}
+
 /* ------------------- WiFi ------------------- */
 static void scan_completed_cb(ScanResult *pApList, void *arg)
 {
@@ -653,28 +678,39 @@ static void get_str_tag(httpd_request_t *req, const char *tag, char *out, int le
 
 static int h_status(httpd_request_t *req)
 {
-    char js[600];
-    snprintf(js, sizeof(js),
+    char js[1600];
+    int n = snprintf(js, sizeof(js),
         "{\"mac\":\"%s\",\"ip\":\"%s\",\"softap\":%d,"
         "\"power\":%d,\"speed\":%d,\"mode\":%d,\"led\":%d,\"lock\":%d,"
         "\"led_mode\":%d,\"led_hue\":%d,\"led_bright\":%d,\"led_type\":%d,"
         "\"led_r\":%d,\"led_g\":%d,\"led_b\":%d,\"led_ws\":%d,"
         "\"out_r\":%d,\"out_g\":%d,\"out_b\":%d,\"ws_scale\":%d,"
         "\"night_en\":%d,\"night_on\":%d,\"night_off\":%d,"
+        "\"cd_sec\":%ld,\"cd_action\":%d,"
         "\"rpm\":%lu,\"filter\":%lu,\"total\":%lu,"
-        "\"ssid\":\"%s\",\"ver\":\"%s\"}",
+        "\"ssid\":\"%s\",\"ver\":\"%s\",\"task\":[",
         a1_mac, sta_ip, softap_mode,
         cfg->power, cfg->speed, cfg->mode, cfg->led, cfg->lock,
         cfg->led_mode, cfg->led_hue, cfg->led_bright, g_led_type,
         g_led_r, g_led_g, g_led_b, g_led_ws_pin,
         g_led_r_out, g_led_g_out, g_led_b_out, g_ws_scale,
         cfg->night_en, cfg->night_on, cfg->night_off,
+        (long)g_cd_sec, g_cd_action,
         (unsigned long)fan_rpm, (unsigned long)cfg->filter_seconds,
         (unsigned long)cfg->total_seconds, cfg_ssid(), A1_VERSION);
+    for (int i = 0; i < 5 && n > 0 && n < (int)sizeof(js); i++) {
+        n += snprintf(js + n, sizeof(js) - n,
+            "%s{\"h\":%d,\"m\":%d,\"r\":%d,\"a\":%d,\"on\":%d}",
+            i ? "," : "", cfg->task[i].hour, cfg->task[i].minute,
+            cfg->task[i].repeat, cfg->task[i].action, cfg->task[i].on);
+    }
+    if (n < 0) n = 0;
+    if (n >= (int)sizeof(js)) n = sizeof(js) - 1;
+    snprintf(js + n, sizeof(js) - n, "]}");
     return send_json(req, js);
 }
 static int h_power(httpd_request_t *req){ int v=get_int_tag(req,"value",-1); if(v==0||v==1) cfg->power=v; a1_apply(); cfg_dirty = 1; return h_status(req);}
-static int h_speed(httpd_request_t *req){ int v=get_int_tag(req,"value",-1); if(v>=0){cfg->speed=v;cfg->mode=0;cfg->power=(v>0);} a1_apply(); cfg_dirty = 1; return h_status(req);}
+static int h_speed(httpd_request_t *req){ int v=get_int_tag(req,"value",-1); if(v>=0){cfg->speed=v;cfg->mode=0;cfg->power=(v>0);} a1_apply_fan(); cfg_dirty = 1; g_panel_hold = 2; return h_status(req);}
 static int h_mode(httpd_request_t *req){ int v=get_int_tag(req,"value",-1); if(v>=0&&v<=6){cfg->mode=v;cfg->power=(v!=0);} a1_apply(); cfg_dirty = 1; return h_status(req);}
 static int h_led(httpd_request_t *req){
     int v=get_int_tag(req,"value",-1); if(v==0||v==1) cfg->led=v;
@@ -781,6 +817,9 @@ static const char page_ctrl[] =
 ".seg{display:grid;grid-template-columns:repeat(5,1fr);gap:8px}"
 ".seg button{height:46px;border:1px solid #2b3752;border-radius:12px;background:#1b2233;color:#b9c6e0;font-size:13px;cursor:pointer;transition:.15s}"
 ".seg button.active{background:linear-gradient(135deg,#4da3ff,#2f7fe0);color:#fff;border-color:transparent;box-shadow:0 3px 10px rgba(77,163,255,.35)}"
+".trow{display:flex;gap:8px;align-items:center;margin-top:8px}"
+".trow input,.trow select{height:34px;background:#1b2233;border:1px solid #2b3752;border-radius:8px;color:#e8eefc;padding:0 6px;font-size:13px;min-width:0}"
+".trow input[type=time]{flex:1.2}.trow select{flex:1}"
 "input[type=range]{-webkit-appearance:none;width:100%;height:6px;border-radius:6px;background:#2b3752;outline:none}"
 "input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:24px;height:24px;border-radius:50%;background:#4da3ff;box-shadow:0 2px 8px rgba(77,163,255,.6);cursor:pointer}"
 "input[type=range].hue{background:linear-gradient(90deg,#f00,#ff0,#0f0,#0ff,#00f,#f0f,#f00)}"
@@ -802,15 +841,10 @@ static const char page_ctrl[] =
 "<button data-m=4 onclick='setM(4)'>中速</button><button data-m=5 onclick='setM(5)'>高速</button>"
 "<button data-m=6 onclick='setM(6)'>极速</button></div></div>"
 "<div class=card><div class=lbl><span>灯环</span><div class='sw' id=lsw onclick='togL()'><i></i></div></div>"
-"<div class=row><span class=tag>模式</span><button class='active' style='flex:1;height:38px;border:0;border-radius:10px;background:#1b2233;color:#b9c6e0' onclick='setLM(1)' id=lm1>随速</button>"
-"<button style='flex:1;height:38px;border:0;border-radius:10px;background:#1b2233;color:#b9c6e0' onclick='setLM(2)' id=lm2>固定</button></div>"
-"<div class=row><span class=tag>驱动</span><button style='flex:1;height:38px;border:0;border-radius:10px;background:#1b2233;color:#b9c6e0' onclick='setLT(1)' id=lt1>三路RGB</button>"
-"<button style='flex:1;height:38px;border:0;border-radius:10px;background:#1b2233;color:#b9c6e0' onclick='setLT(2)' id=lt2>WS2812</button></div>"
-"<div class=row><span class=tag>特效</span>"
-"<button style='flex:1;height:38px;border:0;border-radius:10px;background:#1b2233;color:#b9c6e0' onclick='setLM(3)' id=lm3>跑马</button>"
-"<button style='flex:1;height:38px;border:0;border-radius:10px;background:#1b2233;color:#b9c6e0' onclick='setLM(4)' id=lm4>流光</button>"
-"<button style='flex:1;height:38px;border:0;border-radius:10px;background:#1b2233;color:#b9c6e0' onclick='setLM(5)' id=lm5>呼吸</button>"
-"<button style='flex:1;height:38px;border:0;border-radius:10px;background:#1b2233;color:#b9c6e0' onclick='setLM(6)' id=lm6>彩虹</button></div>"
+"<div class=lbl style='margin-top:4px'><span>效果</span></div>"
+"<div class=seg style='grid-template-columns:repeat(3,1fr)'>"
+"<button onclick='setLM(1)' id=lm1>随速</button><button onclick='setLM(2)' id=lm2>固定</button><button onclick='setLM(3)' id=lm3>跑马</button>"
+"<button onclick='setLM(4)' id=lm4>流光</button><button onclick='setLM(5)' id=lm5>呼吸</button><button onclick='setLM(6)' id=lm6>彩虹</button></div>"
 "<div class=lbl style='margin-top:12px'><span>颜色</span><span class=val id=hv>200</span></div>"
 "<input type=range class=hue id=hue min=0 max=359 oninput='setH(this.value)'>"
 "<div class=lbl style='margin-top:12px'><span>亮度</span><span class=val id=bv>80</span></div>"
@@ -820,18 +854,31 @@ static const char page_ctrl[] =
 "<div class=row><span class=tag>关</span><input type=time id=nt_off style='flex:1;height:38px;background:#1b2233;border:1px solid #2b3752;border-radius:10px;color:#e8eefc;padding:0 8px;box-sizing:border-box'></div>"
 "<button onclick='saveN()' style='width:100%;height:40px;margin-top:8px;border:0;border-radius:10px;background:linear-gradient(135deg,#4da3ff,#2f7fe0);color:#fff;font-size:14px'>保存定时</button>"
 "<div style='color:#8aa0c8;font-size:12px;margin-top:6px'>到点自动点亮/熄灭灯环(夜灯), 按设备时间</div></div>"
+"<div class=card><div class=lbl><span>定时开关</span><span style='font-size:11px;color:#5a6b8c'>需联网对时</span></div>"
+"<div class=trow><input type=time id=t0t onchange='saveT(0)'><select id=t0a onchange='saveT(0)'><option value=1>开</option><option value=0>关</option></select><select id=t0r onchange='saveT(0)'><option value=127>每天</option><option value=31>工作日</option><option value=96>周末</option><option value=0>一次</option></select><div class='sw' id=t0e onclick='togT(0)'><i></i></div></div>"
+"<div class=trow><input type=time id=t1t onchange='saveT(1)'><select id=t1a onchange='saveT(1)'><option value=1>开</option><option value=0>关</option></select><select id=t1r onchange='saveT(1)'><option value=127>每天</option><option value=31>工作日</option><option value=96>周末</option><option value=0>一次</option></select><div class='sw' id=t1e onclick='togT(1)'><i></i></div></div>"
+"<div class=trow><input type=time id=t2t onchange='saveT(2)'><select id=t2a onchange='saveT(2)'><option value=1>开</option><option value=0>关</option></select><select id=t2r onchange='saveT(2)'><option value=127>每天</option><option value=31>工作日</option><option value=96>周末</option><option value=0>一次</option></select><div class='sw' id=t2e onclick='togT(2)'><i></i></div></div>"
+"<div class=trow><input type=time id=t3t onchange='saveT(3)'><select id=t3a onchange='saveT(3)'><option value=1>开</option><option value=0>关</option></select><select id=t3r onchange='saveT(3)'><option value=127>每天</option><option value=31>工作日</option><option value=96>周末</option><option value=0>一次</option></select><div class='sw' id=t3e onclick='togT(3)'><i></i></div></div>"
+"<div class=trow><input type=time id=t4t onchange='saveT(4)'><select id=t4a onchange='saveT(4)'><option value=1>开</option><option value=0>关</option></select><select id=t4r onchange='saveT(4)'><option value=127>每天</option><option value=31>工作日</option><option value=96>周末</option><option value=0>一次</option></select><div class='sw' id=t4e onclick='togT(4)'><i></i></div></div></div>"
+"<div class=card><div class=lbl><span>倒计时</span><span class=val id=cdv>--</span></div>"
+"<div class=row><input id=cdmin type=number min=1 max=1440 placeholder='分钟' style='flex:1;height:38px;background:#1b2233;border:1px solid #2b3752;border-radius:10px;color:#e8eefc;padding:0 8px;box-sizing:border-box'>"
+"<button onclick='cd(1)' style='flex:1;height:38px;border:0;border-radius:10px;background:#1b2233;color:#b9c6e0'>定时开机</button>"
+"<button onclick='cd(0)' style='flex:1;height:38px;border:0;border-radius:10px;background:#1b2233;color:#b9c6e0'>定时关机</button></div>"
+"<button onclick='cdCancel()' style='width:100%;height:36px;margin-top:8px;border:0;border-radius:10px;background:#333c52;color:#b9c6e0'>取消倒计时</button></div>"
 "<div class=card><div class=lbl><span>OTA 固件升级</span></div>"
 "<input id=fw type=file accept='.bin,.ota' style='width:100%;color:#e8eefc;margin-bottom:10px'>"
 "<button id=ob onclick='doOtaUp()' style='width:100%;height:44px;border:0;border-radius:12px;background:linear-gradient(135deg,#f6a623,#f56c6c);color:#fff;font-size:15px'>上传并升级</button>"
 "<div id=oprog style='color:#8aa0c8;font-size:12px;margin-top:8px'>选择 .ota.bin 文件后点击上传; 成功后设备自动重启</div></div>"
 "<div class=card><div class=stat>"
-"<div><div class=n id=rp>0</div><div class=t>转速</div></div>"
-"<div><div class=n id=fl>0</div><div class=t>滤芯(h)</div></div></div></div>"
+"<div><div class=n id=rp>0</div><div class=t>转速 RPM</div></div>"
+"<div><div class=n id=fl>0</div><div class=t>滤芯(h)</div></div>"
+"<div><div class=n id=fr>0%</div><div class=t>滤芯剩余</div></div></div></div>"
 "<div style='text-align:center;color:#5a6b8c;font-size:12px' id=ver></div>"
 "</div><script>"
-"var D={};"
+"var D={};var LIFE=2000;"
 "function api(u){return fetch(u).then(function(r){return r.json();});}"
 "function byId(i){return document.getElementById(i);}"
+"function pad(n){return ('0'+n).slice(-2);}"
 "function show(d){D=d;"
 "var p=byId('pw');p.className='power'+(d.power?' on':'');p.textContent=d.power?'运行中 · 点击关机':'已关机 · 点击开机';"
 "byId('sv').textContent=d.speed+'%';byId('sp').value=d.speed;"
@@ -841,13 +888,15 @@ static const char page_ctrl[] =
 "byId('hue').value=d.led_hue;byId('hv').textContent=d.led_hue;"
 "byId('br').value=d.led_bright;byId('bv').textContent=d.led_bright;"
 "byId('lm1').style.background=(d.led_mode==1)?'#4da3ff':'#1b2233';byId('lm2').style.background=(d.led_mode==2)?'#4da3ff':'#1b2233';"
-"byId('lt1').style.background=(d.led_type==1)?'#4da3ff':'#1b2233';byId('lt2').style.background=(d.led_type==2)?'#4da3ff':'#1b2233';"
 "byId('lm3').style.background=(d.led_mode==3)?'#4da3ff':'#1b2233';byId('lm4').style.background=(d.led_mode==4)?'#4da3ff':'#1b2233';"
 "byId('lm5').style.background=(d.led_mode==5)?'#4da3ff':'#1b2233';byId('lm6').style.background=(d.led_mode==6)?'#4da3ff':'#1b2233';"
 "byId('nsw').className='sw'+(d.night_en?' on':'');"
 "if(d.night_on>=0)byId('nt_on').value=('0'+Math.floor(d.night_on/60)).slice(-2)+':'+('0'+(d.night_on%60)).slice(-2);"
 "if(d.night_off>=0)byId('nt_off').value=('0'+Math.floor(d.night_off/60)).slice(-2)+':'+('0'+(d.night_off%60)).slice(-2);"
 "byId('rp').textContent=d.rpm;byId('fl').textContent=Math.floor(d.filter/3600);"
+"var fh=d.filter/3600;byId('fr').textContent=Math.max(0,Math.round((LIFE-fh)/LIFE*100))+'%';"
+"if(d.cd_sec>0){var cm=Math.floor(d.cd_sec/60),cs=d.cd_sec%60;byId('cdv').textContent=(d.cd_action?'开机':'关机')+' '+pad(cm)+':'+pad(cs);}else{byId('cdv').textContent='--';}"
+"for(var i=0;i<5;i++){var x=(d.task&&d.task[i])?d.task[i]:{h:0,m:0,r:127,a:1,on:0};var et=byId('t'+i+'t');if(document.activeElement!=et)et.value=pad(x.h)+':'+pad(x.m);var ea=byId('t'+i+'a');if(document.activeElement!=ea)ea.value=x.a;var er=byId('t'+i+'r');if(document.activeElement!=er)er.value=x.r;byId('t'+i+'e').className='sw'+(x.on?' on':'');}"
 "byId('ver').textContent='固件 '+d.ver+'  '+d.mac;}"
 "function g(){return api('/api/status').then(show);}"
 "function tog(){api('/api/power?value='+(D.power?0:1)).then(show);}"
@@ -855,7 +904,10 @@ static const char page_ctrl[] =
 "function setM(m){api('/api/mode?value='+m).then(show);}"
 "function togL(){api('/api/led?value='+(D.led?0:1)).then(show);}"
 "function setLM(m){api('/api/led?mode='+m).then(show);}"
-"function setLT(m){api('/api/led?type='+m).then(show);}"
+"function saveT(i){var tv=byId('t'+i+'t').value.split(':');if(tv.length<2)return;var a=parseInt(byId('t'+i+'a').value,10);var r=parseInt(byId('t'+i+'r').value,10);api('/api/task?i='+i+'&hour='+parseInt(tv[0],10)+'&minute='+parseInt(tv[1],10)+'&repeat='+r+'&action='+a).then(g);}"
+"function togT(i){var e=byId('t'+i+'e');var on=(e.className.indexOf('on')>=0)?0:1;e.className='sw'+(on?' on':'');api('/api/task?i='+i+'&on='+on).then(g);}"
+"function cd(a){var m=parseInt(byId('cdmin').value,10);if(!m||m<1){alert('请输入分钟数');return;}api('/api/countdown?sec='+(m*60)+'&action='+a).then(show);}"
+"function cdCancel(){api('/api/countdown?sec=0').then(show);}"
 "function togN(){api('/api/led?night='+(D.night_en?0:1)).then(show);}"
 "function saveN(){var a=byId('nt_on').value.split(':');var b=byId('nt_off').value.split(':');if(a.length<2||b.length<2){alert('请选择开/关时间');return;}api('/api/led?n_on='+(parseInt(a[0],10)*60+parseInt(a[1],10))+'&n_off='+(parseInt(b[0],10)*60+parseInt(b[1],10))).then(show);alert('定时已保存');}"
 "function setH(v){byId('hv').textContent=v;api('/api/led?mode=2&hue='+v).then(show);}"
@@ -1269,6 +1321,18 @@ static int h_task(httpd_request_t *req)
     return send_json(req, js);
 }
 
+static int h_countdown(httpd_request_t *req)
+{
+    int sec = get_int_tag(req, "sec", -1);
+    int act = get_int_tag(req, "action", -1);
+    if (sec >= 0) {
+        g_cd_sec = sec;
+        if (act == 0 || act == 1) g_cd_action = act;
+        A1_LOG("COUNTDOWN set %d sec, action=%d", (int)g_cd_sec, g_cd_action);
+    }
+    return h_status(req);
+}
+
 static int h_favicon(httpd_request_t *req){ httpd_send_all_header(req, HTTP_RES_200, 0, "image/x-icon"); return kNoErr; }
 static struct httpd_wsgi_call handlers[] = {
     {"/",                 HDRS, 0, h_root,        NULL, NULL, NULL},
@@ -1289,6 +1353,7 @@ static struct httpd_wsgi_call handlers[] = {
     {"/api/ota",          HDRS, 0, h_ota,         NULL, NULL, NULL},
     {"/api/ota_upload",   HDRS, 0, NULL,          h_ota_upload, NULL, NULL},
     {"/api/task",         HDRS, 0, h_task,        NULL, NULL, NULL},
+    {"/api/countdown",    HDRS, 0, h_countdown,   NULL, NULL, NULL},
     {"/api/diag/pwm",     HDRS, 0, h_diag_pwm,    NULL, NULL, NULL},
     {"/api/diag/pwmstop", HDRS, 0, h_diag_pwmstop,NULL, NULL, NULL},
     {"/api/diag/gpio",    HDRS, 0, h_diag_gpio,   NULL, NULL, NULL},
@@ -1318,7 +1383,7 @@ static void sntp_synced_cb(void){ time_synced = true; A1_LOG("sntp time synced")
 
 static void task_apply(uint8_t action){
     if (action == 0) { cfg->power = 0; }
-    else { cfg->speed = action; cfg->mode = 0; cfg->power = 1; }
+    else { cfg->power = 1; if (cfg->speed < 1) cfg->speed = 25; cfg->mode = 0; }
     A1_LOG("TIMER action=%d", action);
     a1_apply(); cfg_dirty = 1;
 }
@@ -1379,11 +1444,11 @@ static void a1_tick_thread(void *arg)
             hold = 0;
         }
         bprev = b;
-        /* 每 4 个 50ms (200ms) 读一次面板 */
+        /* 每 2 个 50ms (100ms) 读一次面板, 滑条更跟手 */
         static int pdiv = 0;
         static int panel_warm = 0;   /* 上电忽略前 1.5s，防止抖动误触发 */
         if (panel_warm < 30) panel_warm++;
-        if (++pdiv >= 4) {
+        if (++pdiv >= 2) {
             pdiv = 0;
             uint8_t rx[4] = {0};
             if (panel_warm >= 30 && panel_read(rx)) {
@@ -1404,8 +1469,7 @@ static void a1_tick_thread(void *arg)
                 if (sl != 0xFF && sl <= 100) {
                     if (cfg->speed != sl || !cfg->power) {
                         cfg->speed = sl; cfg->mode = 0; cfg->power = 1;
-                        A1_LOG("PANEL slider -> speed=%d", sl);
-                        a1_apply(); cfg_dirty = 1;
+                        a1_apply_fan(); cfg_dirty = 1; g_panel_hold = 2;
                     }
                 }
             }
@@ -1413,9 +1477,20 @@ static void a1_tick_thread(void *arg)
         if (++sec >= 20) {                       /* 每 1s */
             sec = 0;
             uint32_t p = fan_pulses;
-            fan_rpm = (p - last) * 30; last = p;
+            fan_rpm = (uint32_t)((uint64_t)(p - last) * 60 / A1_TACHO_PPR);
+            last = p;
+            if (g_cd_sec > 0) {                      /* 倒计时 */
+                g_cd_sec--;
+                if (g_cd_sec == 0) {
+                    if (g_cd_action) { cfg->power = 1; if (cfg->speed < 1) cfg->speed = 25; }
+                    else cfg->power = 0;
+                    A1_LOG("COUNTDOWN done -> power=%d", cfg->power);
+                    a1_apply(); cfg_dirty = 1;
+                }
+            }
             if (cfg->power) { cfg->total_seconds++; cfg->filter_seconds++; }
-            if (cfg_dirty) cfg_save_now();       /* 延迟落盘: 每秒最多写一次 flash */
+            if (g_panel_hold > 0) g_panel_hold--;
+            if (cfg_dirty && g_panel_hold == 0) cfg_save_now();   /* 延迟落盘: 滑动停止后再写 flash */
             { static int last_min = -1; time_t t=time(NULL); struct tm *tm=localtime(&t);
               if (time_synced && tm && tm->tm_min != last_min) { last_min = tm->tm_min; tasks_check(); night_check(); } }
         }
@@ -1431,7 +1506,7 @@ void appRestoreDefault_callback(void * const user_config_data, uint32_t size)
     memset(u, 0, sizeof(*u));
     u->version = A1_CFG_VERSION;
     strncpy(u->name, "A1", sizeof(u->name) - 1);
-    u->led = 1; u->led_mode = 1; u->led_hue = 200; u->led_bright = 80;
+    u->led = 0; u->led_mode = 1; u->led_hue = 200; u->led_bright = 80;
     u->night_en = 0; u->night_on = -1; u->night_off = -1;
     u->mqtt_port = 1883;
     u->pwm_ch = A1_FAN_PWM; u->fan_en_gpio = A1_FAN_ENABLE_GPIO;
