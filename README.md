@@ -15,7 +15,7 @@
 - 31 颗 WS2812 灯环：随速 / 固定色 / 跑马灯 / 流光 / 呼吸 / 静态彩虹，色相与亮度可调
 - 热点配网：`A1_xxxx` @ `192.168.4.1`，网页扫描 WiFi 并连接
 - REST API + 深色网页控制界面
-- MQTT + Home Assistant 自动发现
+- MQTT + Home Assistant 自动发现（⚠️ **未实机验证**）
 - OTA 升级（网页上传本地 `.bin`）
 - 5 组定时任务，SNTP 自动对时
 - 滤芯计时 / 童锁 / 运行时间 / 串口日志
@@ -154,6 +154,7 @@ cd3618b81ca8cd26b43caca885fbc9bf
 - 已配网：访问设备 IP 打开控制网页
 - MQTT topic：`device/a1/<mac>/{set,state,availability}`
 - Home Assistant 自动发现：`homeassistant/fan/<name>/config`
+- ⚠️ **MQTT / Home Assistant 自动发现尚未实机验证**，首次使用请接串口（24/25 脚 @115200）看日志排查。
 
 ### 主要 API
 
@@ -170,6 +171,8 @@ cd3618b81ca8cd26b43caca885fbc9bf
 - `kernel/A1_kernel.bin` 是**第三方二进制内核**（非本仓库源码），版权归其原始提供方所有。
 - 本仓库不包含 MiCO SDK、工具链、原厂固件备份，以避免体积与版权问题。
 - 修改配置结构时需递增 `A1_CFG_VERSION`，否则旧配置可能导致异常。
+- **MQTT / Home Assistant 自动发现尚未实机验证**，相关功能与 topic 可能仍需调整。
+- **OTA 上传升级尚未完成实机验证**，首次使用请盯串口日志。
 - 详细开发记录、硬件逆向结论与踩坑经验见 [`项目记录.md`](项目记录.md)。
 
 ## 致谢
