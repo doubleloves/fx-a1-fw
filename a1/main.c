@@ -81,6 +81,8 @@ typedef struct { char ssid[33]; int16_t rssi; } ap_item_t;
 static ap_item_t scan_ap[MAX_SCAN_AP];
 static volatile int scan_count = 0;
 static volatile int scanning = 0;
+static volatile int scan_state = 0;   /* 0=空闲 1=扫描中 2=有结果 */
+static volatile int scan_wait = 0;    /* 扫描超时秒数 */
 
 static char *cfg_ssid(void) { return sys_context->micoSystemConfig.ssid; }
 static char *cfg_key(void)  { return sys_context->micoSystemConfig.user_key; }
@@ -556,6 +558,8 @@ static void scan_completed_cb(ScanResult *pApList, void *arg)
     (void)arg;
     scan_count = 0;
     scanning = 0;
+    scan_state = 2;
+    scan_wait = 0;
     if (pApList) {
         int n = (unsigned char)pApList->ApNum;
         for (int i = 0; i < n && i < MAX_SCAN_AP; i++) {
@@ -769,13 +773,21 @@ static int h_factory(httpd_request_t *req){ send_json(req,"{\"ok\":1}"); mico_th
 
 static int h_wifi_scan(httpd_request_t *req)
 {
-    scanning = 1; scan_count = 0;
-    micoWlanStartScan();
-    int tries = 0;
-    while (scanning && tries++ < 60) mico_thread_msleep(100);
+    /* 非阻塞扫描: 前端带 ?start=1 启动, 之后轮询直到 scanning=0 */
+    int start = get_int_tag(req, "start", 0);
+    if (start && scan_state != 1) {
+        scan_count = 0;
+        scanning = 1;
+        scan_state = 1;
+        scan_wait = 15;                 /* 最多等 15s, 由 tick 超时兜底 */
+        micoWlanStartScan();
+    }
+    if (scan_state == 1)
+        return send_json(req, "{\"scanning\":1,\"aps\":[]}");
+
     /* 静态缓冲, 避免每次扫描 malloc/free 造成堆碎片 */
     static char js[2048];
-    int n = snprintf(js, sizeof(js), "{\"aps\":[");
+    int n = snprintf(js, sizeof(js), "{\"scanning\":0,\"aps\":[");
     for (int i = 0; i < scan_count && n > 0 && n < (int)sizeof(js); i++) {
         char ssid[33 * 6 + 1];
         json_escape(ssid, sizeof(ssid), scan_ap[i].ssid);
@@ -833,10 +845,12 @@ static const char page_setup[] =
 "<div class=c><input id=ssid placeholder='WiFi 名称'><input id=pass placeholder='密码'>"
 "<button onclick='save()'>保存并连接</button></div>"
 "<script>"
-"function scan(){document.getElementById('aps').innerHTML='扫描中...';"
-"fetch('/api/wifi/scan?x='+Date.now()).then(r=>r.json()).then(d=>{"
-"var h='';d.aps.forEach(a=>{h+='<div class=ap onclick=\"pick(\\''+a.ssid+'\\')\">'+a.ssid+' <small>'+a.rssi+'</small></div>'});"
-"document.getElementById('aps').innerHTML=h||'未找到网络';})}"
+"function scan(){var box=document.getElementById('aps');box.textContent='扫描中...';var n=0;"
+"function poll(){fetch('/api/wifi/scan?start='+(n?'0':'1')+'&x='+Date.now()).then(function(r){return r.json();}).then(function(d){"
+"if(d.scanning){if(++n>20){box.textContent='扫描超时';return;}setTimeout(poll,500);return;}"
+"box.innerHTML='';(d.aps||[]).forEach(function(a){var e=document.createElement('div');e.className='ap';e.textContent=a.ssid+' ';var s=document.createElement('small');s.textContent=a.rssi;e.appendChild(s);e.onclick=function(){pick(a.ssid);};box.appendChild(e);});"
+"if(!box.children.length)box.textContent='未找到网络';}).catch(function(){if(++n>20){box.textContent='扫描失败';}else{setTimeout(poll,500);}});}"
+"poll();}"
 "function pick(s){document.getElementById('ssid').value=s}"
 "function save(){var s=document.getElementById('ssid').value,p=document.getElementById('pass').value;"
 "fetch('/api/wifi/set?ssid='+encodeURIComponent(s)+'&pass='+encodeURIComponent(p)).then(r=>r.json())"
@@ -920,7 +934,8 @@ static const char page_ctrl[] =
 "<div><div class=n id=fr>0%</div><div class=t>滤芯剩余</div></div></div></div>"
 "<div style='text-align:center;color:#5a6b8c;font-size:12px' id=ver></div>"
 "</div><script>"
-"var D={};var LIFE=2000;"
+"var D={};var LIFE=2000;var TMR={};"
+"function deb(k,f){clearTimeout(TMR[k]);TMR[k]=setTimeout(f,150);}"
 "function api(u){return fetch(u).then(function(r){return r.json();});}"
 "function byId(i){return document.getElementById(i);}"
 "function pad(n){return ('0'+n).slice(-2);}"
@@ -945,7 +960,7 @@ static const char page_ctrl[] =
 "byId('ver').textContent='固件 '+d.ver+'  '+d.mac;}"
 "function g(){return api('/api/status').then(show);}"
 "function tog(){api('/api/power?value='+(D.power?0:1)).then(show);}"
-"function setS(v){byId('sv').textContent=v+'%';api('/api/speed?value='+v).then(show);}"
+"function setS(v){byId('sv').textContent=v+'%';deb('s',function(){api('/api/speed?value='+v).then(show);});}"
 "function setM(m){api('/api/mode?value='+m).then(show);}"
 "function togL(){api('/api/led?value='+(D.led?0:1)).then(show);}"
 "function setLM(m){api('/api/led?mode='+m).then(show);}"
@@ -955,8 +970,8 @@ static const char page_ctrl[] =
 "function cdCancel(){api('/api/countdown?sec=0').then(show);}"
 "function togN(){api('/api/led?night='+(D.night_en?0:1)).then(show);}"
 "function saveN(){var a=byId('nt_on').value.split(':');var b=byId('nt_off').value.split(':');if(a.length<2||b.length<2){alert('请选择开/关时间');return;}api('/api/led?n_on='+(parseInt(a[0],10)*60+parseInt(a[1],10))+'&n_off='+(parseInt(b[0],10)*60+parseInt(b[1],10))).then(show);alert('定时已保存');}"
-"function setH(v){byId('hv').textContent=v;api('/api/led?mode=2&hue='+v).then(show);}"
-"function setB(v){byId('bv').textContent=v;api('/api/led?bright='+v).then(show);}"
+"function setH(v){byId('hv').textContent=v;deb('h',function(){api('/api/led?mode=2&hue='+v).then(show);});}"
+"function setB(v){byId('bv').textContent=v;deb('b',function(){api('/api/led?bright='+v).then(show);});}"
 "function doOtaUp(){var f=byId('fw').files[0];if(!f){alert('请先选择 .ota.bin 文件');return;}if(!confirm('确认升级到 '+f.name+' ('+f.size+' 字节)?\\n升级期间请勿断电, 完成后设备会自动重启'))return;var P=byId('oprog');P.textContent='1/3 上传中 0%';var x=new XMLHttpRequest();x.open('POST','/api/ota_upload?ts='+Date.now(),true);x.setRequestHeader('Content-Type','application/octet-stream');x.upload.onprogress=function(e){if(e.lengthComputable)P.textContent='1/3 上传中 '+Math.round(e.loaded/e.total*100)+'%';};x.onload=function(){P.textContent='2/3 上传完成, 设备写入flash+校验中…';waitOta();};x.onerror=function(){P.textContent='2/3 上传连接结束, 设备可能正在写入并重启…';waitOta();};x.send(f);}"
 "function waitOta(){var n=0,P=byId('oprog');var t=setInterval(function(){n++;fetch('/api/status?ts='+Date.now()).then(function(r){return r.json();}).then(function(d){clearInterval(t);P.textContent='3/3 升级成功! 设备已重启, 当前版本 '+d.ver;}).catch(function(){P.textContent='3/3 等待设备重启…已 '+(n*2)+' 秒';});if(n>45){clearInterval(t);P.textContent='3/3 超时(90秒): 刷新页面看版本号, 变新即成功';}},2000);}"
 "g();setInterval(g,3000);"
@@ -1569,6 +1584,10 @@ static void a1_tick_thread(void *arg)
             }
             if (cfg->power) { cfg->total_seconds++; cfg->filter_seconds++; }
             if (g_panel_hold > 0) g_panel_hold--;
+            if (scan_wait > 0 && --scan_wait == 0 && scan_state == 1) {
+                scan_state = 2; scanning = 0;
+                A1_LOG("wifi scan timeout");
+            }
             if (cfg_dirty && g_panel_hold == 0) cfg_save_now();   /* 延迟落盘: 滑动停止后再写 flash */
             { static int last_min = -1; time_t t=time(NULL); struct tm *tm=localtime(&t);
               if (time_synced && tm && tm->tm_min != last_min) { last_min = tm->tm_min; tasks_check(); night_check(); } }
