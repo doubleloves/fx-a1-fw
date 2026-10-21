@@ -3,7 +3,7 @@
 基于 MXCHIP MiCO / EMW3080B（RTL8710B）平台，从零编写的 A1 空气净化器固件。
 支持触摸面板、WS2812 灯环、网页控制、热点配网、MQTT / Home Assistant、OTA 和定时任务。
 
-> **当前版本：v1.0**（2026-10-21） · [更新日志](CHANGELOG.md) · 固件 `dist/FX_A1_v1.0.bin`
+> **当前版本：v1.2**（2026-10-21） · [更新日志](CHANGELOG.md) · 固件 `dist/FX_A1_v1.2.bin`
 
 > 本项目只包含**应用层源码**。MiCO SDK、编译工具链、第三方二进制内核、设备原厂备份**均不在仓库中**，需按下方说明自行准备。
 
@@ -14,10 +14,10 @@
 ```bash
 ./setup.sh                  # 拉取 SDK + 打补丁 + 建工具链软链
 ./tools/extract_kernel.sh   # 下载基础固件并提取 kernel/A1_kernel.bin
-./build.sh                  # 编译 + 打包 → dist/FX_A1_v1.0.bin
+./build.sh                  # 编译 + 打包 → dist/FX_A1_v1.2.bin
 ```
 
-刷写（传统方式）：19 脚接 GND 上电进 bootloader → 串口 9/10 @921600 → 输入 `3 -id 3` → YMODEM 发送 `dist/FX_A1_v1.0.bin` → `7` 重启。
+刷写（传统方式）：19 脚接 GND 上电进 bootloader → 串口 9/10 @921600 → 输入 `3 -id 3` → YMODEM 发送 `dist/FX_A1_v1.2.bin` → `7` 重启。
 详细步骤见下文「刷写」，操作前务必阅读安全提示。
 
 
@@ -134,7 +134,7 @@ cd3618b81ca8cd26b43caca885fbc9bf
 ./build.sh a1 release_log # 带串口日志（调试用）
 ```
 
-产物：`dist/FX_A1_v1.0.bin`
+产物：`dist/FX_A1_v1.2.bin`
 
 ## 刷写
 
@@ -151,7 +151,7 @@ cd3618b81ca8cd26b43caca885fbc9bf
    ```
 
    等设备提示 `Waiting for the file...`
-4. 用串口终端的 **YMODEM 发送**功能，发送 `dist/FX_A1_v1.0.bin`
+4. 用串口终端的 **YMODEM 发送**功能，发送 `dist/FX_A1_v1.2.bin`
    - SecureCRT：`Transfer → Send YMODEM`
    - Xshell：`传输 → 用 YMODEM 发送`
    - 其他终端找 `YMODEM send` / `sz --ymodem` 等价功能

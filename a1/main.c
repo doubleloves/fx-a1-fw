@@ -16,7 +16,7 @@
 #include "CheckSumUtils.h"
 
 #define A1_LOG(...) custom_log("A1", __VA_ARGS__)
-#define A1_VERSION "1.0"
+#define A1_VERSION "1.2"
 
 /* ------------------- 硬件配置(可按实机调整) ------------------- */
 #ifndef A1_FAN_PWM
