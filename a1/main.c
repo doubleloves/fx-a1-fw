@@ -289,8 +289,10 @@ static void hsl2rgb(int h, int s, int l, int *r, int *g, int *b)
 }
 static void led_ring_refresh(void)
 {
+    static int lr = -1, lg = -1, lb = -1;
     if (cfg->led && cfg->led_mode >= 3) {   /* 3/4/5/6 = 特效, 交给 fx 线程输出 */
         g_led_r_out = g_led_g_out = g_led_b_out = 0;
+        lr = lg = lb = -1;                  /* 退出特效后能立即刷新 */
         return;
     }
     int r = 0, g = 0, b = 0;
@@ -313,8 +315,13 @@ static void led_ring_refresh(void)
         r = r * br / 100; g = g * br / 100; b = b * br / 100;
     }
     g_led_r_out = r; g_led_g_out = g; g_led_b_out = b;
-    if (g_led_type == 2) ws2_flush(r, g, b);   /* 快速寄存器通道(bit12), 才能正确时序 */
-    else                 led_drive(r, g, b);
+    if (g_led_type == 2) {
+        if (r == lr && g == lg && b == lb) return;   /* 颜色没变就不发帧 */
+        lr = r; lg = g; lb = b;
+        ws2_flush(r, g, b);   /* 快速寄存器通道(bit12) */
+    } else {
+        led_drive(r, g, b);
+    }
 }
 
 /* ---- 灯环特效: 3=跑马灯 4=流光 5=呼吸 6=静态彩虹 ---- */
@@ -495,6 +502,9 @@ static void a1_fan_set(int speed)
 {
     if (speed < 0) speed = 0;
     if (speed > 100) speed = 100;
+    static int last_sp = -1;
+    if (speed == last_sp) return;   /* 没变就不重设 PWM */
+    last_sp = speed;
     /* 风机只有 PWM。若配置的“继电器”脚与灯环某一色冲突, 则跳过(避免抢脚)。 */
     bool use_en = (cfg->fan_en_gpio >= 0 && !is_led_pin(cfg->fan_en_gpio));
     if (speed == 0) {
@@ -676,9 +686,37 @@ static void get_str_tag(httpd_request_t *req, const char *tag, char *out, int le
     httpd_get_tag_from_url(req, (char *)tag, out, len - 1);
 }
 
+/* 把字符串转义成 JSON 字符串内容(不含首尾引号), 避免 SSID 里的 " \ 破坏 JSON */
+static int json_escape(char *dst, int dstlen, const char *src)
+{
+    int n = 0;
+    for (; src && *src; src++) {
+        unsigned char c = (unsigned char)*src;
+        const char *esc = NULL; char tmp[8];
+        if (c == '"')       esc = "\\\"";
+        else if (c == '\\') esc = "\\\\";
+        else if (c == '\n') esc = "\\n";
+        else if (c == '\r') esc = "\\r";
+        else if (c == '\t') esc = "\\t";
+        else if (c < 0x20) { snprintf(tmp, sizeof(tmp), "\\u%04x", c); esc = tmp; }
+        if (esc) {
+            int l = strlen(esc);
+            if (n + l >= dstlen) break;
+            memcpy(dst + n, esc, l); n += l;
+        } else {
+            if (n + 1 >= dstlen) break;
+            dst[n++] = (char)c;
+        }
+    }
+    if (dstlen > 0) dst[n < dstlen ? n : dstlen - 1] = 0;
+    return n;
+}
+
 static int h_status(httpd_request_t *req)
 {
     char js[1600];
+    char essid[200];
+    json_escape(essid, sizeof(essid), cfg_ssid());
     int n = snprintf(js, sizeof(js),
         "{\"mac\":\"%s\",\"ip\":\"%s\",\"softap\":%d,"
         "\"power\":%d,\"speed\":%d,\"mode\":%d,\"led\":%d,\"lock\":%d,"
@@ -697,7 +735,7 @@ static int h_status(httpd_request_t *req)
         cfg->night_en, cfg->night_on, cfg->night_off,
         (long)g_cd_sec, g_cd_action,
         (unsigned long)fan_rpm, (unsigned long)cfg->filter_seconds,
-        (unsigned long)cfg->total_seconds, cfg_ssid(), A1_VERSION);
+        (unsigned long)cfg->total_seconds, essid, A1_VERSION);
     for (int i = 0; i < 5 && n > 0 && n < (int)sizeof(js); i++) {
         n += snprintf(js + n, sizeof(js) - n,
             "%s{\"h\":%d,\"m\":%d,\"r\":%d,\"a\":%d,\"on\":%d}",
@@ -735,23 +773,30 @@ static int h_wifi_scan(httpd_request_t *req)
     micoWlanStartScan();
     int tries = 0;
     while (scanning && tries++ < 60) mico_thread_msleep(100);
-    char *js = malloc(64 + MAX_SCAN_AP * 48);
-    if (!js) return send_json(req, "{\"aps\":[]}");
-    int n = sprintf(js, "{\"aps\":[");
-    for (int i = 0; i < scan_count; i++)
-        n += sprintf(js + n, "%s{\"ssid\":\"%s\",\"rssi\":%d}", i ? "," : "", scan_ap[i].ssid, scan_ap[i].rssi);
-    sprintf(js + n, "]}");
-    int r = send_json(req, js);
-    free(js);
-    return r;
+    /* 静态缓冲, 避免每次扫描 malloc/free 造成堆碎片 */
+    static char js[2048];
+    int n = snprintf(js, sizeof(js), "{\"aps\":[");
+    for (int i = 0; i < scan_count && n > 0 && n < (int)sizeof(js); i++) {
+        char ssid[33 * 6 + 1];
+        json_escape(ssid, sizeof(ssid), scan_ap[i].ssid);
+        n += snprintf(js + n, sizeof(js) - n,
+                      "%s{\"ssid\":\"%s\",\"rssi\":%d}",
+                      i ? "," : "", ssid, scan_ap[i].rssi);
+    }
+    if (n < 0) n = 0;
+    if (n >= (int)sizeof(js)) n = sizeof(js) - 1;
+    snprintf(js + n, sizeof(js) - n, "]}");
+    return send_json(req, js);
 }
 
 static int h_wifi_status(httpd_request_t *req)
 {
-    char js[128];
+    char js[256];
+    char ssid[200];
+    json_escape(ssid, sizeof(ssid), cfg_ssid());
     snprintf(js, sizeof(js),
              "{\"configured\":%d,\"connected\":%d,\"ip\":\"%s\",\"ssid\":\"%s\",\"softap\":%d,\"evt\":%d,\"fails\":%d}",
-             strlen(cfg_ssid()) > 0, sta_connected, sta_ip, cfg_ssid(), softap_mode, wifi_evt, wifi_fail_cnt);
+             strlen(cfg_ssid()) > 0, sta_connected, sta_ip, ssid, softap_mode, wifi_evt, wifi_fail_cnt);
     return send_json(req, js);
 }
 
@@ -1150,15 +1195,36 @@ static bool i2c_setup(int addr7);
 
 /* ---------------- 面板 (I2C 0x08) ---------------- */
 #define PANEL_I2C_ADDR 0x08
+static mico_i2c_device_t g_panel_i2c;
+static bool              g_panel_i2c_ready = false;
+
+/* 面板 I2C 只初始化一次, 不要每次读取都 init/finalize(会明显拖慢滑条) */
+static bool panel_i2c_ensure(void)
+{
+    if (g_panel_i2c_ready) return true;
+    memset(&g_panel_i2c, 0, sizeof(g_panel_i2c));
+    g_panel_i2c.port = MICO_I2C_1;
+    g_panel_i2c.address = PANEL_I2C_ADDR;
+    g_panel_i2c.address_width = I2C_ADDRESS_WIDTH_7BIT;
+    g_panel_i2c.speed_mode = I2C_STANDARD_SPEED_MODE;
+    if (MicoI2cInitialize(&g_panel_i2c) == kNoErr) {
+        g_panel_i2c_ready = true;
+        return true;
+    }
+    return false;
+}
 static bool panel_read(uint8_t *rx)
 {
     bool ok = false;
     mico_rtos_lock_mutex(&g_i2c_mux);
-    if (i2c_setup(PANEL_I2C_ADDR)) {
+    if (panel_i2c_ensure()) {
         uint8_t tx[1] = {0x00}; mico_i2c_message_t m;
         OSStatus e = MicoI2cBuildCombinedMessage(&m, tx, rx, 1, 4, 2);
-        if (e == kNoErr) e = MicoI2cTransfer(&g_i2cdev, &m, 1);
-        MicoI2cFinalize(&g_i2cdev);
+        if (e == kNoErr) e = MicoI2cTransfer(&g_panel_i2c, &m, 1);
+        if (e != kNoErr) {                 /* 失败时丢掉句柄, 下次重新初始化 */
+            MicoI2cFinalize(&g_panel_i2c);
+            g_panel_i2c_ready = false;
+        }
         ok = (e == kNoErr);
     }
     mico_rtos_unlock_mutex(&g_i2c_mux);
@@ -1176,23 +1242,28 @@ static bool i2c_setup(int addr7)
 }
 static int h_diag_i2cscan(httpd_request_t *req)
 {
-    char *js = malloc(512); if (!js) return send_json(req, "{\"found\":[]}");
+    static char js[1280];   /* 静态缓冲, 避免堆分配 */
     mico_rtos_lock_mutex(&g_i2c_mux);
-    int n = sprintf(js, "{\"found\":[");
+    int n = snprintf(js, sizeof(js), "{\"found\":[");
     int first = 1;
     for (int a = 0x08; a <= 0x77; a++) {
         if (i2c_setup(a)) {
             uint8_t tx[1] = {0}; mico_i2c_message_t m;
             if (MicoI2cBuildTxMessage(&m, tx, 1, 2) == kNoErr &&
                 MicoI2cTransfer(&g_i2cdev, &m, 1) == kNoErr) {
-                n += sprintf(js + n, "%s\"0x%02X\"", first ? "" : ",", a); first = 0;
+                if (n < (int)sizeof(js) - 8)
+                    n += snprintf(js + n, sizeof(js) - n, "%s\"0x%02X\"", first ? "" : ",", a);
+                first = 0;
             }
             MicoI2cFinalize(&g_i2cdev);
         }
     }
-    sprintf(js + n, "]}");
+    if (n < 0) n = 0;
+    if (n >= (int)sizeof(js)) n = sizeof(js) - 1;
+    snprintf(js + n, sizeof(js) - n, "]}");
+    g_panel_i2c_ready = false;   /* 诊断动过 I2C 端口, 面板下次重新初始化 */
     mico_rtos_unlock_mutex(&g_i2c_mux);
-    int r = send_json(req, js); free(js); return r;
+    return send_json(req, js);
 }
 static int h_diag_i2c(httpd_request_t *req)
 {
@@ -1210,11 +1281,22 @@ static int h_diag_i2c(httpd_request_t *req)
     else err = MicoI2cBuildRxMessage(&m, rx, cnt, 2);
     if (err == kNoErr) err = MicoI2cTransfer(&g_i2cdev, &m, 1);
     MicoI2cFinalize(&g_i2cdev);
+    g_panel_i2c_ready = false;   /* 诊断动过 I2C 端口, 面板下次重新初始化 */
     A1_LOG("diag i2c addr=0x%02X reg=%d n=%d -> %d", addr, reg, cnt, err);
     mico_rtos_unlock_mutex(&g_i2c_mux);
     int k = sprintf(js, "{\"ok\":%d,\"data\":[", err == kNoErr ? 1 : 0);
     for (int i = 0; i < cnt; i++) k += sprintf(js + k, "%s%d", i ? "," : "", rx[i]);
     sprintf(js + k, "]}");
+    return send_json(req, js);
+}
+static int h_diag_mem(httpd_request_t *req)
+{
+    micoMemInfo_t *m = MicoGetMemoryInfo();
+    char js[160];
+    if (m) snprintf(js, sizeof(js),
+                    "{\"free\":%d,\"total\":%d,\"alloc\":%d,\"chunks\":%d}",
+                    m->free_memory, m->total_memory, m->allocted_memory, m->num_of_chunks);
+    else snprintf(js, sizeof(js), "{\"ok\":0}");
     return send_json(req, js);
 }
 static int h_diag_gpioread(httpd_request_t *req)
@@ -1259,10 +1341,8 @@ static int h_ota_upload(httpd_request_t *req)
         return send_json(req, "{\"ok\":0,\"err\":\"post only\"}");
 
     /* 先解析 HTTP 头, 拿到 Content-Length (body_nbytes/remaining_bytes) */
-    char *hdr = malloc(HTTPD_MAX_MESSAGE);
-    if (!hdr) return send_json(req, "{\"ok\":0,\"err\":\"mem\"}");
+    char hdr[HTTPD_MAX_MESSAGE];
     OSStatus herr = httpd_parse_hdr_tags(req, req->sock, hdr, HTTPD_MAX_MESSAGE);
-    free(hdr);
     if (herr != kNoErr) {
         A1_LOG("OTA up: header parse err %d", herr);
         return send_json(req, "{\"ok\":0,\"err\":\"hdr\"}");
@@ -1279,8 +1359,7 @@ static int h_ota_upload(httpd_request_t *req)
     uint32_t offset = 0;
     int left = total;
     CRC16_Context cc; CRC16_Init(&cc);
-    uint8_t *buf = malloc(1024);
-    if (!buf) return send_json(req, "{\"ok\":0,\"err\":\"mem2\"}");
+    static uint8_t buf[1024];   /* 静态缓冲, 避免 OTA 时堆分配失败 */
     while (left > 0) {
         int want = (left > 1024) ? 1024 : left;
         int r = httpd_recv(req->sock, buf, want, 0);
@@ -1289,7 +1368,6 @@ static int h_ota_upload(httpd_request_t *req)
         CRC16_Update(&cc, buf, r);
         left -= r;
     }
-    free(buf);
 
     if (left != 0) {
         A1_LOG("OTA up: INCOMPLETE left=%d", left);
@@ -1366,6 +1444,7 @@ static struct httpd_wsgi_call handlers[] = {
     {"/api/diag/autotest",HDRS, 0, h_diag_autotest,NULL, NULL, NULL},
     {"/api/diag/i2cscan", HDRS, 0, h_diag_i2cscan, NULL, NULL, NULL},
     {"/api/diag/i2c",     HDRS, 0, h_diag_i2c,     NULL, NULL, NULL},
+    {"/api/diag/mem",     HDRS, 0, h_diag_mem,     NULL, NULL, NULL},
 };
 
 static void a1_web_start(void)
@@ -1728,8 +1807,8 @@ int main(void)
     A1_LOG("step: wifi started");
 
     sntp_start_auto_time_sync(3600000, sntp_synced_cb);
-    /* 默认上电: 开机运行 + 风速 25% (每次上电都是这个状态) */
-    cfg->power = 1; cfg->mode = 0; cfg->speed = 25;
+    /* 上电默认: 关机(不自动启动), 用网页或触摸面板手动开启 */
+    cfg->power = 0;
     a1_apply();
     mico_rtos_create_thread(NULL, MICO_APPLICATION_PRIORITY, "a1tick",
                             (mico_thread_function_t)a1_tick_thread, 0x600, 0);

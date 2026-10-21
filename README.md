@@ -164,7 +164,7 @@ cd3618b81ca8cd26b43caca885fbc9bf
 /api/lock    /api/filter/reset        /api/reboot  /api/factory
 /api/wifi/scan  /api/wifi/status  /api/wifi/set
 /api/mqtt   /api/ota   /api/task   /api/countdown
-诊断: /api/diag/pwm  /api/diag/gpio  /api/diag/i2c  /api/diag/i2cscan
+诊断: /api/diag/pwm  /api/diag/gpio  /api/diag/i2c  /api/diag/i2cscan  /api/diag/mem
 ```
 
 - `/api/task?i=0..4&hour=HH&minute=MM&repeat=R&action=A&on=0|1`
@@ -177,6 +177,7 @@ cd3618b81ca8cd26b43caca885fbc9bf
 - `kernel/A1_kernel.bin` 是**第三方二进制内核**（非本仓库源码），版权归其原始提供方所有。
 - 本仓库不包含 MiCO SDK、工具链、原厂固件备份，以避免体积与版权问题。
 - 修改配置结构时需递增 `A1_CFG_VERSION`，否则旧配置可能导致异常。
+- 内存：HTTP 路径已去掉 `malloc/free`，改用静态缓冲，减少堆碎片；可用 `/api/diag/mem` 查看堆使用。
 - **MQTT / Home Assistant 自动发现尚未实机验证**，相关功能与 topic 可能仍需调整。
 - **OTA 上传升级尚未完成实机验证**，首次使用请盯串口日志。
 - **定时开关 / 倒计时尚未实机验证**，建议先短时间倒计时测试。
@@ -188,6 +189,7 @@ cd3618b81ca8cd26b43caca885fbc9bf
 
 - [zA1](https://github.com/a2633063/zA1) — 公开的 A1 兼容固件项目。本项目的**基础内核来自该项目的 v0.3.1 公开固件**，拆机/接线/烧录方式也参考了它的 wiki。
 - [MXCHIP / mico-os](https://github.com/MXCHIP/mico-os) — MiCO SDK
+- [esphome-phicomm-m1](https://github.com/gitercn/esphome-phicomm-m1) — RTL8710B 内存优化、烧录与协议参考
 
 > 本项目与上述项目的作者无隶属关系；相关二进制与文档版权归原作者所有。
 
