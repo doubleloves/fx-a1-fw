@@ -3,9 +3,23 @@
 基于 MXCHIP MiCO / EMW3080B（RTL8710B）平台，从零编写的 A1 空气净化器固件。
 支持触摸面板、WS2812 灯环、网页控制、热点配网、MQTT / Home Assistant、OTA 和定时任务。
 
+> **当前版本：v1.0**（2026-10-21） · [更新日志](CHANGELOG.md) · 固件 `dist/FX_A1_v1.0.bin`
+
 > 本项目只包含**应用层源码**。MiCO SDK、编译工具链、第三方二进制内核、设备原厂备份**均不在仓库中**，需按下方说明自行准备。
 
 ---
+
+## 快速开始（TL;DR）
+
+```bash
+./setup.sh                  # 拉取 SDK + 打补丁 + 建工具链软链
+./tools/extract_kernel.sh   # 下载基础固件并提取 kernel/A1_kernel.bin
+./build.sh                  # 编译 + 打包 → dist/FX_A1_v1.0.bin
+```
+
+刷写（传统方式）：19 脚接 GND 上电进 bootloader → 串口 9/10 @921600 → 输入 `3 -id 3` → YMODEM 发送 `dist/FX_A1_v1.0.bin` → `7` 重启。
+详细步骤见下文「刷写」，操作前务必阅读安全提示。
+
 
 ## 功能
 
@@ -20,6 +34,18 @@
 - OTA 升级（网页上传本地 `.bin`）
 - **5 组定时开关**（一次 / 每天 / 工作日 / 周末）+ **倒计时开关机**，SNTP 自动对时（⚠️ **未实机验证**）
 - 风扇转速（RPM）/ 滤芯使用时间与剩余寿命 / 童锁 / 运行时间 / 串口日志
+
+### 项目状态
+
+| 功能 | 状态 |
+|---|---|
+| 开关 / 风速 / 模式 / 面板滑条 | ✅ 已实机验证 |
+| 网页控制 / 热点配网 / WiFi 回退 | ✅ 已实机验证 |
+| 31 颗 WS2812 灯环 / 特效 | ✅ 驱动已验证；灯珠数 31 待最终确认 |
+| 定时开关 / 倒计时 | ⚠️ 已实现，待实机验证 |
+| 风扇转速 / 滤芯剩余 | ⚠️ 已实现，待实机验证 |
+| MQTT / Home Assistant 自动发现 | ⚠️ 已实现，待实机验证 |
+| 网页 OTA 上传升级 | ⚠️ 已实现，待实机验证 |
 
 ## 硬件
 
@@ -50,15 +76,17 @@
 ├── patches/            # 对 MXCHIP mico-os SDK 的少量修改
 ├── tools/              # 烧写、备份、内核提取脚本
 ├── kernel/             # 基础内核放置目录（*.bin 不入库）
+├── dist/               # 最终固件输出（FX_A1_v*.bin，不入库）
 ├── build.sh            # 编译 + 自动打包
 ├── pack.sh             # 内核 + 应用 → dist/FX_A1_v<版本>.bin
 ├── setup.sh            # 拉取 SDK、打补丁、创建工具链软链
-├── flash.sh            # 刷写
+├── flash.sh            # 刷写（3 -id 3 + YMODEM 自动化，可选）
 ├── restore.sh          # 恢复原固件
+├── CHANGELOG.md        # 更新日志
 └── 项目记录.md          # 开发过程与踩坑记录（详细）
 ```
 
-## 快速开始
+## 从源码构建
 
 ### 1. 准备环境
 
@@ -127,7 +155,7 @@ cd3618b81ca8cd26b43caca885fbc9bf
    - SecureCRT：`Transfer → Send YMODEM`
    - Xshell：`传输 → 用 YMODEM 发送`
    - 其他终端找 `YMODEM send` / `sz --ymodem` 等价功能
-5. 等待传输完成（约 596KB）
+5. 等待传输完成（约 597KB）
 6. 输入 `7` 重启（`6` 也可启动应用），或断电重上电
 7. 断电、断开 19 脚，再正常上电运行
 
@@ -172,6 +200,41 @@ cd3618b81ca8cd26b43caca885fbc9bf
   - `action`: `0`=关机, `1`=开机
 - `/api/countdown?sec=秒&action=0|1`（`sec=0` 取消）
 
+## 开发与调试
+
+- **应用日志**：模块 **24/25 脚 @ 115200**；bootloader 菜单 **9/10 脚 @ 921600**
+- **带日志构建**：`./build.sh a1 release_log`
+- **诊断接口**：
+  - `/api/diag/mem` — 堆使用（free/total/alloc/chunks）
+  - `/api/diag/i2cscan` — I2C 扫描（触摸面板应为 `0x08`）
+  - `/api/diag/i2c?addr=0x08&reg=0&n=4` — 读面板原始数据
+  - `/api/diag/pwm?ch=2&duty=N` — 测试风机 PWM
+  - `/api/diag/gpioread?pin=N` — 读 GPIO
+- **串口 CLI**：`led ...`、`pwm ...`，详见 [`项目记录.md`](项目记录.md)
+
+## 常见问题
+
+**构建时找不到 Python 2.7 / arm-none-eabi-gcc？**
+检查 `tools/py27/bin/python` 和 `tools/gnu-mcu-eclipse/.../bin`；GCC 可用 `GCC_BIN` 指定。
+
+**`pack.sh` 提示缺少 `kernel/A1_kernel.bin`？**
+运行 `./tools/extract_kernel.sh`；下载失败时手动下载基础固件后传入路径。
+
+**刷完后不启动 / 风扇不转？**
+确认刷写时未接 220V、滤芯微动开关已闭合、写入的是分区 ID3（`3 -id 3`）；接串口看日志。
+
+**面板滑条不够顺？**
+确认使用新版（面板 I2C 只初始化一次）；可再降低灯环刷新频率或调整轮询间隔。
+
+**转速一直显示 0？**
+风机 tacho 需接到 `MICO_GPIO_10`；不同风扇脉冲数/转不同，可改 `A1_TACHO_PPR`。
+
+**定时不执行？**
+定时依赖 SNTP 对时，设备需已联网；可先用倒计时验证执行逻辑。
+
+**OTA 上传失败？**
+确认文件同格式且 <741KB，并使用 `Content-Length`；失败不影响当前固件，可串口恢复。
+
 ## 说明与限制
 
 - `kernel/A1_kernel.bin` 是**第三方二进制内核**（非本仓库源码），版权归其原始提供方所有。
@@ -197,3 +260,10 @@ cd3618b81ca8cd26b43caca885fbc9bf
 ## License
 
 应用层源码可视为 MIT；第三方 SDK、基础内核及原厂固件遵循各自原始许可，不在本项目授权范围内。
+
+## 免责声明
+
+本项目为个人学习与自用项目，与斐讯、MXCHIP、Realtek 及其它第三方项目无隶属关系。
+刷机有风险，可能导致设备损坏或变砖；请自行备份原机 Flash 并确认已理解操作风险。
+因使用本项目造成的任何直接或间接损失，作者不承担责任。
+
